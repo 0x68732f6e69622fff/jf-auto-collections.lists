@@ -1,0 +1,307 @@
+name: Fetch JSONs
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: '0 3 * * *'  # Runs every day at 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  mdblist_and_trakt:
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the repository
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      # Set up jq and gnupg for JSON processing and encryption
+      - name: Set up jq and GPG
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq gnupg
+
+      # Install Python for Trakt API processing
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      # Install Python dependencies (requests)
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      # Delete previous .json files from the repository before committing
+      - name: Delete previous JSON files from repository
+        run: |
+          echo "Deleting old .json files from repository"
+          git ls-files *.json | xargs rm -f
+
+      # Fetch list of available lists from the MDBlist API
+      - name: Fetch list of available lists from MDBlist
+        run: |
+          echo "Fetching list of available lists..."
+          curl -sf "https://api.mdblist.com/lists/user?apikey=${{ secrets.API_KEY }}" -o "lists.json" || exit 1
+          echo "Fetched list of lists successfully."
+
+      # Fetch items for each list based on naming criteria from MDBlist
+      - name: Fetch items for each list from MDBlist
+        run: |
+          slugs=$(jq -r '.[] | select((.name | test("^(dynamic|unified)")) and (.name | test("^(?!static)"))) | {name, slug} | @base64' lists.json)
+          for line in $slugs; do
+            _jq() {
+              echo ${line} | base64 --decode | jq -r ${1}
+            }
+            name=$(_jq '.name')
+            slug=$(_jq '.slug')
+            filename=$(echo "$name" | sed 's/\./_/g')
+            echo "Processing list: $name (slug: $slug), saving as $filename.json"
+            if curl -sf "https://api.mdblist.com/lists/${{ secrets.AUTHOR }}/$slug/items?apikey=${{ secrets.API_KEY }}" -o "${filename}.json"; then
+              if jq . "${filename}.json" > /dev/null; then
+                echo "Successfully fetched items for $name into ${filename}.json"
+              else
+                echo "Error: Invalid JSON format for list $name" >&2
+              fi
+            else
+              echo "Failed to fetch data for list: $name" >&2
+            fi
+          done
+
+      # Delete lists.json file before committing
+      - name: Delete lists.json file before committing
+        run: |
+          echo "Deleting lists.json file before committing"
+          rm -f lists.json
+
+      # Add the Python script and execute it
+      - name: Run Python Script
+        run: |
+          echo "Running Python script..."
+          cat <<EOF > fetch_trakt_data.py
+          import requests
+          import json
+          import logging
+          import os
+          import time
+
+          # Constants
+          CLIENT_ID = "${{ secrets.TRAKT_TOKEN }}"
+          BASE_URL = 'https://api.trakt.tv'
+
+          API_URLS = {
+              "trending": {
+                  "movies": f"{BASE_URL}/movies/trending?limit=100",
+                  "tv": f"{BASE_URL}/shows/trending?limit=100"
+              },
+              "popular": {
+                  "movies": f"{BASE_URL}/movies/popular",
+                  "tv": f"{BASE_URL}/shows/popular"
+              },
+              "favorited_all": {
+                  "movies": f"{BASE_URL}/movies/favorited/all?limit=500",
+                  "tv": f"{BASE_URL}/shows/favorited/all?limit=500"
+              },
+              "favorited_yearly": {
+                  "movies": f"{BASE_URL}/movies/favorited/yearly?limit=250",
+                  "tv": f"{BASE_URL}/shows/favorited/yearly?limit=250"
+              },
+              "favorited_monthly": {
+                  "movies": f"{BASE_URL}/movies/favorited/monthly?limit=100",
+                  "tv": f"{BASE_URL}/shows/favorited/monthly?limit=100"
+              },
+              "favorited_weekly": {
+                  "movies": f"{BASE_URL}/movies/favorited/weekly?limit=50",
+                  "tv": f"{BASE_URL}/shows/favorited/weekly?limit=50"
+              },
+              "favorited_daily": {
+                  "movies": f"{BASE_URL}/movies/favorited/daily?limit=25",
+                  "tv": f"{BASE_URL}/shows/favorited/daily?limit=25"
+              },
+              "watched_all": {
+                  "movies": f"{BASE_URL}/movies/watched/all?limit=500",
+                  "tv": f"{BASE_URL}/shows/watched/all?limit=500"
+              },
+              "watched_yearly": {
+                  "movies": f"{BASE_URL}/movies/watched/yearly?limit=250",
+                  "tv": f"{BASE_URL}/shows/watched/yearly?limit=250"
+              },
+              "watched_monthly": {
+                  "movies": f"{BASE_URL}/movies/watched/monthly?limit=100",
+                  "tv": f"{BASE_URL}/shows/watched/monthly?limit=100"
+              },
+              "watched_weekly": {
+                  "movies": f"{BASE_URL}/movies/watched/weekly?limit=50",
+                  "tv": f"{BASE_URL}/shows/watched/weekly?limit=50"
+              },
+              "watched_daily": {
+                  "movies": f"{BASE_URL}/movies/watched/daily?limit=25",
+                  "tv": f"{BASE_URL}/shows/watched/daily?limit=25"
+              },
+              "collected_all": {
+                  "movies": f"{BASE_URL}/movies/collected/all?limit=500",
+                  "tv": f"{BASE_URL}/shows/collected/all?limit=500"
+              },
+              "collected_yearly": {
+                  "movies": f"{BASE_URL}/movies/collected/yearly?limit=250",
+                  "tv": f"{BASE_URL}/shows/collected/yearly?limit=250"
+              },
+              "collected_monthly": {
+                  "movies": f"{BASE_URL}/movies/collected/monthly?limit=100",
+                  "tv": f"{BASE_URL}/shows/collected/monthly?limit=100"
+              },
+              "collected_weekly": {
+                  "movies": f"{BASE_URL}/movies/collected/weekly?limit=50",
+                  "tv": f"{BASE_URL}/shows/collected/weekly?limit=50"
+              },
+              "collected_daily": {
+                  "movies": f"{BASE_URL}/movies/collected/daily?limit=25",
+                  "tv": f"{BASE_URL}/shows/collected/daily?limit=25"
+              }
+          }
+
+          # Configure logging
+          def setup_logger():
+              logger = logging.getLogger('plex_trakt_sync')
+              logger.setLevel(logging.INFO)
+
+              # Handlers
+              console_handler = logging.StreamHandler()
+
+              # Formatter
+              formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+              console_handler.setFormatter(formatter)
+
+              # Add handlers
+              logger.addHandler(console_handler)
+
+              return logger
+
+          logger = setup_logger()
+
+          # Function to fetch data from Trakt API
+          def fetch_data(url):
+              headers = {
+                  'Content-Type': 'application/json',
+                  'trakt-api-version': '2',
+                  'trakt-api-key': CLIENT_ID
+              }
+              try:
+                  response = requests.get(url, headers=headers)
+                  response.raise_for_status()
+                  logger.info(f"Fetched data successfully from {url}")
+                  return response.json()
+              except requests.RequestException as e:
+                  logger.error(f"Failed to fetch data from {url}: {e}")
+                  return []
+
+          # Function to simplify the fetched data (adapted to your new JSON structure)
+          def simplify_data(data, is_movie):
+              simplified_data = []
+              id_field = 'tmdb' if is_movie else 'tvdb'
+
+              for rank, item in enumerate(data, start=1):
+                  content = item.get('movie') if is_movie else item.get('show')
+                  if content:
+                      # For Movies
+                      if is_movie:
+                          simplified_data.append({
+                              "id": content.get('ids', {}).get('tmdb'),
+                              "rank": rank,
+                              "adult": 0,  # Set to 0 as default
+                              "title": content.get('title'),
+                              "imdb_id": content.get('ids', {}).get('imdb', None),
+                              "tvdb_id": None,
+                              "language": "en",  # Defaulting to "en" as per your sample
+                              "mediatype": "movie",
+                              "release_year": content.get('year'),
+                              "spoken_language": "en"  # Defaulting to "en"
+                          })
+                      # For TV Shows
+                      else:
+                          simplified_data.append({
+                              "id": content.get('ids', {}).get('tvdb'),
+                              "rank": rank,
+                              "adult": 0,  # Set to 0 as default
+                              "title": content.get('title'),
+                              "imdb_id": content.get('ids', {}).get('imdb', None),
+                              "tvdb_id": content.get('ids', {}).get('tvdb'),
+                              "language": "en",  # Defaulting to "en" as per your sample
+                              "mediatype": "show",
+                              "release_year": content.get('year'),
+                              "spoken_language": "en"  # Defaulting to "en"
+                          })
+              return simplified_data
+
+          # Function to save data to a JSON file
+          def save_to_json(data, filename):
+              filepath = os.path.join(filename)
+              try:
+                  with open(filepath, 'w') as json_file:
+                      json.dump(data, json_file, indent=4)
+                  logger.info(f"Data saved to {filepath}")
+              except Exception as e:
+                  logger.error(f"Failed to save data to {filepath}: {e}")
+
+          # General function to process media (movies or shows)
+          def process_media(action, is_movie):
+              category = "movies" if is_movie else "tv"
+              url = API_URLS[action][category]
+              data = fetch_data(url)
+              simplified_data = simplify_data(data, is_movie)
+
+              # Structuring the final output layout
+              layout = {
+                  "movies": [] if not is_movie else simplified_data,
+                  "shows": [] if is_movie else simplified_data
+              }
+
+              # Determine filename for the output
+              filename = f"trakt_{action}_{category}.json"
+              save_to_json(layout, filename)
+
+          # Run the script for movies and TV shows
+          def main():
+              actions = ["trending", "popular", "favorited_all", "favorited_yearly", "favorited_monthly", "favorited_weekly", "favorited_daily", "watched_all", "watched_yearly", "watched_monthly", "watched_weekly", "watched_daily", "collected_all", "collected_yearly", "collected_monthly", "collected_weekly", "collected_daily"]
+              for action in actions:
+                  for is_movie in [True, False]:  # True for movies, False for TV shows
+                      time.sleep(1)
+                      process_media(action, is_movie)
+
+
+          if __name__ == "__main__":
+              main()
+          EOF
+
+          # Run the Python script
+          python fetch_trakt_data.py
+
+      # Delete the Python script for Trakt
+      - name: Delete fetch_trakt_data.py file before committing
+        run: |
+          rm -f fetch_trakt_data.py
+
+      # Compress and Encrypt JSON Files from Trakt
+      - name: Compress and Encrypt Trakt JSON Files
+        run: |
+          for json_file in *.json; do
+            gzip -f "$json_file"
+            gpg --batch --yes --passphrase "${{ secrets.GPG_PASSWORD }}" -c "$json_file.gz"
+            mv "$json_file.gz.gpg" "$json_file"
+          done
+
+      # Commit and Push Trakt JSON files
+      - name: Commit and Push Trakt Changes
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add *.json
+          git commit -m "Updated Trakt JSON files" || echo "No changes to commit"
+          git push --force origin main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
