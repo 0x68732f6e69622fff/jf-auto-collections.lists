@@ -91,7 +91,7 @@ jobs:
           import time
 
           # Constants
-          CLIENT_ID = "${{ secrets.TRAKT_TOKEN }}"
+          CLIENT_TOKEN = "${{ secrets.TRAKT_TOKEN }}"
           BASE_URL = 'https://api.trakt.tv'
 
           API_URLS = {
@@ -189,7 +189,7 @@ jobs:
               headers = {
                   'Content-Type': 'application/json',
                   'trakt-api-version': '2',
-                  'trakt-api-key': CLIENT_ID
+                  'trakt-api-key': CLIENT_TOKEN
               }
               try:
                   response = requests.get(url, headers=headers)
@@ -301,7 +301,7 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
           git add *.json
-          git commit -m "Updated Trakt JSON files" || echo "No changes to commit"
+          git commit -m "Updated JSONs" || echo "No changes to commit"
           git push --force origin main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
