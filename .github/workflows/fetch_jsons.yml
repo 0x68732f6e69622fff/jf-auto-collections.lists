@@ -8,49 +8,42 @@ on:
     branches:
       - main
   schedule:
-    - cron: '0 1 * * *'  # Runs every day at 03:00 UTC
+    - cron: '0 1 * * *'
   workflow_dispatch:
 
 jobs:
   mdblist_and_trakt:
     runs-on: ubuntu-latest
     steps:
-      # Checkout the repository
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v3
 
-      # Set up jq and gnupg for JSON processing and encryption
-      - name: Set up jq and GPG
+      - name: Set up jq and gpg
         run: |
           sudo apt-get update
           sudo apt-get install -y jq gnupg
 
-      # Install Python for Trakt API processing
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.x'
 
-      # Install Python dependencies (requests)
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests
 
-      # Delete previous .json files from the repository before committing
       - name: Delete previous JSON files from repository
         run: |
           echo "Deleting old .json files from repository"
           git ls-files *.json | xargs rm -f
 
-      # Fetch list of available lists from the MDBlist API
       - name: Fetch list of available lists from MDBlist
         run: |
           echo "Fetching list of available lists..."
           curl -sf "https://api.mdblist.com/lists/user?apikey=${{ secrets.API_KEY }}" -o "lists.json" || exit 1
           echo "Fetched list of lists successfully."
 
-      # Fetch items for each list based on naming criteria from MDBlist
       - name: Fetch items for each list from MDBlist
         run: |
           slugs=$(jq -r '.[] | select((.name | test("^(dynamic|unified)")) and (.name | test("^(?!static)"))) | {name, slug} | @base64' lists.json)
@@ -73,14 +66,12 @@ jobs:
             fi
           done
 
-      # Delete lists.json file before committing
       - name: Delete lists.json file before committing
         run: |
           echo "Deleting lists.json file before committing"
           rm -f lists.json
 
-      # Add the Python script and execute it
-      - name: Run Python Script
+      - name: Run python script
         run: |
           echo "Running Python script..."
           cat <<EOF > fetch_trakt_data.py
@@ -90,8 +81,7 @@ jobs:
           import os
           import time
 
-          # Constants
-          CLIENT_TOKEN = "${{ secrets.TRAKT_TOKEN }}"
+          AUTH_TOKEN = "${{ secrets.TRAKT_TOKEN }}"
           BASE_URL = 'https://api.trakt.tv'
 
           API_URLS = {
@@ -165,31 +155,25 @@ jobs:
               }
           }
 
-          # Configure logging
           def setup_logger():
               logger = logging.getLogger('plex_trakt_sync')
               logger.setLevel(logging.INFO)
 
-              # Handlers
               console_handler = logging.StreamHandler()
-
-              # Formatter
               formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
               console_handler.setFormatter(formatter)
 
-              # Add handlers
               logger.addHandler(console_handler)
 
               return logger
 
           logger = setup_logger()
 
-          # Function to fetch data from Trakt API
           def fetch_data(url):
               headers = {
                   'Content-Type': 'application/json',
                   'trakt-api-version': '2',
-                  'trakt-api-key': CLIENT_TOKEN
+                  'trakt-api-key': AUTH_TOKEN
               }
               try:
                   response = requests.get(url, headers=headers)
@@ -200,7 +184,6 @@ jobs:
                   logger.error(f"Failed to fetch data from {url}: {e}")
                   return []
 
-          # Function to simplify the fetched data (adapted to your new JSON structure)
           def simplify_data(data, is_movie):
               simplified_data = []
               id_field = 'tmdb' if is_movie else 'tvdb'
@@ -208,37 +191,34 @@ jobs:
               for rank, item in enumerate(data, start=1):
                   content = item.get('movie') if is_movie else item.get('show')
                   if content:
-                      # For Movies
                       if is_movie:
                           simplified_data.append({
                               "id": content.get('ids', {}).get('tmdb'),
                               "rank": rank,
-                              "adult": 0,  # Set to 0 as default
+                              "adult": 0,
                               "title": content.get('title'),
                               "imdb_id": content.get('ids', {}).get('imdb', None),
                               "tvdb_id": None,
-                              "language": "en",  # Defaulting to "en" as per your sample
+                              "language": "en",
                               "mediatype": "movie",
                               "release_year": content.get('year'),
-                              "spoken_language": "en"  # Defaulting to "en"
+                              "spoken_language": "en"
                           })
-                      # For TV Shows
                       else:
                           simplified_data.append({
                               "id": content.get('ids', {}).get('tvdb'),
                               "rank": rank,
-                              "adult": 0,  # Set to 0 as default
+                              "adult": 0,
                               "title": content.get('title'),
                               "imdb_id": content.get('ids', {}).get('imdb', None),
                               "tvdb_id": content.get('ids', {}).get('tvdb'),
-                              "language": "en",  # Defaulting to "en" as per your sample
+                              "language": "en",
                               "mediatype": "show",
                               "release_year": content.get('year'),
-                              "spoken_language": "en"  # Defaulting to "en"
+                              "spoken_language": "en"
                           })
               return simplified_data
 
-          # Function to save data to a JSON file
           def save_to_json(data, filename):
               filepath = os.path.join(filename)
               try:
@@ -248,28 +228,24 @@ jobs:
               except Exception as e:
                   logger.error(f"Failed to save data to {filepath}: {e}")
 
-          # General function to process media (movies or shows)
           def process_media(action, is_movie):
               category = "movies" if is_movie else "tv"
               url = API_URLS[action][category]
               data = fetch_data(url)
               simplified_data = simplify_data(data, is_movie)
 
-              # Structuring the final output layout
               layout = {
                   "movies": [] if not is_movie else simplified_data,
                   "shows": [] if is_movie else simplified_data
               }
 
-              # Determine filename for the output
               filename = f"trakt_{action}_{category}.json"
               save_to_json(layout, filename)
 
-          # Run the script for movies and TV shows
           def main():
               actions = ["trending", "popular", "favorited_all", "favorited_yearly", "favorited_monthly", "favorited_weekly", "favorited_daily", "watched_all", "watched_yearly", "watched_monthly", "watched_weekly", "watched_daily", "collected_all", "collected_yearly", "collected_monthly", "collected_weekly", "collected_daily"]
               for action in actions:
-                  for is_movie in [True, False]:  # True for movies, False for TV shows
+                  for is_movie in [True, False]:
                       time.sleep(1)
                       process_media(action, is_movie)
 
@@ -278,16 +254,13 @@ jobs:
               main()
           EOF
 
-          # Run the Python script
           python fetch_trakt_data.py
 
-      # Delete the Python script for Trakt
       - name: Delete fetch_trakt_data.py file before committing
         run: |
           rm -f fetch_trakt_data.py
 
-      # Compress and Encrypt JSON Files from Trakt
-      - name: Compress and Encrypt Trakt JSON Files
+      - name: Compress and encrypt json files
         run: |
           for json_file in *.json; do
             gzip -f "$json_file"
@@ -295,8 +268,7 @@ jobs:
             mv "$json_file.gz.gpg" "$json_file"
           done
 
-      # Commit and Push Trakt JSON files
-      - name: Commit and Push Trakt Changes
+      - name: Commit and push changes
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
