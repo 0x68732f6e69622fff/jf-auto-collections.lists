@@ -1,0 +1,64 @@
+name: Fetch JSONs
+'on':
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: 0 1 * * *
+  workflow_dispatch: null
+jobs:
+  mdblist_and_trakt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Set up jq and gpg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq gnupg
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.x
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+      - name: Delete previous JSON files from repository
+        run: |
+          git ls-files *.json | xargs rm -f
+      - name: Create Python script from secret
+        env:
+          PYTHON_CODE: '${{ secrets.SECRET_PYTHON_CODE }}'
+        run: |
+          echo "$PYTHON_CODE" > code.py
+      - name: Run Python code from secret
+        env:
+          MDBLIST_USER: '${{ secrets.SECRET_MDBLIST_USER }}'
+          MDBLIST_API_KEY: '${{ secrets.SECRET_MDBLIST_API_KEY }}'
+          TRAKT_AUTH_TOKEN: '${{ secrets.SECRET_TRAKT_AUTH_TOKEN }}'
+        run: |
+          python code.py
+      - name: Delete leftovers file before committing
+        run: |
+          rm -f lists.json
+          rm -f code.py
+      - name: Compress and encrypt json files
+        run: |
+          for json_file in *.json; do
+            gzip -f "$json_file"
+            gpg --batch --yes --passphrase "${{ secrets.SECRET_GPG_PASSWORD }}" -c "$json_file.gz"
+            mv "$json_file.gz.gpg" "$json_file"
+          done
+      - name: Commit and push changes
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add *.json
+          git commit -m "Updated JSONs" || echo "No changes to commit"
+          git push --force origin main
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
